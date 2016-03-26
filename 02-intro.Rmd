@@ -1,0 +1,239 @@
+---
+knit: bookdown::preview_chapter
+---
+
+# Introduction {#intro}
+
+
+```{r libraries}
+# required libraries
+library(PKPDmisc)
+library(MSBVAR)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(mrgsolve)
+library(tibble)
+```
+
+This tutorial (almost), is based on the phenobarbitol datastet that comes with NONMEM. The NONMEM code is given below
+
+```{r pheno_code,echo=FALSE}
+run1 <- "
+$PROBLEM    PHENOBARB additive model
+
+$INPUT      ID TIME AMT WT APGR DV
+$DATA       PHENO.dta IGNORE=@
+
+$SUBROUTINE ADVAN1 TRANS2
+
+$PK
+
+  TVCL = THETA(1)*(WT/3)**THETA(4) ; typical value of CL
+  TVV  = THETA(2)*(WT/3)**THETA(5) ; typical value of V
+  
+  CL   = TVCL*EXP(ETA(1))         ; individual value of CL
+  V    = TVV*EXP(ETA(2))          ; individual value of V
+  S1   = V
+
+$ERROR
+
+  IPRED  = F              ; individual prediction
+  IRES   = DV - F         ; individual residual
+  W      = THETA(3)       ; additive residual error
+  IF(W.EQ.0) W = 1
+  IWRES  = IRES/W         ; individual weighed residual
+
+    Y     = IPRED+ERR(1)*W
+
+
+$THETA (0,.005) ; CL
+$THETA (0,1.45) ; V
+$THETA (0, 5)   ; RUV
+$THETA (0, .75) ; WTCL
+$THETA (0, 1)   ; WTV
+
+$OMEGA  0.228   ; VARCL
+$OMEGA  0.146   ; VARV
+
+$SIGMA  1 FIX   ; SIGMA
+
+$ESTIMATION METHOD=1 MAXEVAL=9999 ; FOCE calculation method
+$COV
+
+"
+cat(run1,"\n")
+```
+
+Using the code above, run a simple NONMEM estimation using PsN.
+
+> execute run1.mod -mod
+
+You will need two main output files for simulations with uncertainty
+
+1. psn.cov
+2. psn.ext
+
+The section from here on explains the steps involved in creating the uncertainty distribution
+
+```{r setvars}
+nmult    <- 10000     # number of samples from multnorm, needs to be > NSAMP because we have to throw away negative values
+nsamp    <- 5000      # number of initial samples to resample from
+npar     <- 7         # number of parameter in the model
+
+```
+
+###Read in the covariance matrix of the original run
+
+```{r ref_covmat}
+covmat   <- read.table("../scripts/run1.cov",skip=1, header=T)          # covariance matrix
+
+#vars <- c("THETA","OMEGA")
+## we can write a function to standardize the subsetting
+## # keep only parameters we want to draw (dropping a omega(2,1))
+covmat   <- covmat %>% filter(!NAME %in% c("SIGMA(1,1)","OMEGA(2,1)")) %>% 
+  select(starts_with("THETA"),starts_with("OMEGA")) %>% select(-one_of("OMEGA.2.1."))
+  
+covmat   <- as.matrix(covmat)    
+```
+
+###Read in the final estimates of the original run
+
+```{r final_est_ext}
+center   <- read.table("../scripts/run1.ext",skip=1, header=T)          # final estimates 
+center   <- center %>% filter(ITERATION==-10**9) %>% 
+  select(starts_with("THETA"),starts_with("OMEGA")) %>% select(-one_of("OMEGA.2.1.")) # keep only row with final estimates
+center   <- as.matrix(center) 
+
+```
+
+###Draw samples from multivariate normal distribution
+
+```{r draw_mrnorm_samps}
+set.seed(123)
+simparams <-rmultnorm(nmult, center, covmat)
+### Take first nsamp that have no values < 0 ###
+sim_params <- as.data.frame(simparams)
+summary(sim_params)
+
+sim_par  <- sim_params[ ! apply(sim_params, 1, function (x) any(x < 0) ), ]  # remove all rows for which at least 1 value is < 0
+
+#the step below can be performed using the sample_n function from dplyr too.. I am just keeping it simple for understanding now
+sim_parf <- sim_par[1:nsamp,] %>% as_data_frame                                                # take the desired number of samples  
+
+sim_parf <- sim_parf %>% rename(CL=THETA1,V=THETA2,RUV=THETA3,WTCL=THETA4,WTV=THETA5,
+                              VARCL=OMEGA.1.1.,VARV=OMEGA.2.2.) # need to match ;NAME in .mod
+summary(sim_parf)
+
+```
+
+###Plot parameter distribution
+
+```{r plots}
+mdat <- gather(sim_parf,variable,value)
+# 
+p1 <- ggplot(mdat, aes(x=value, color=variable)) +
+  geom_density() +
+  facet_wrap(~variable, scales="free") +
+  theme(legend.position="none") +
+  labs(title=paste("Distribution of",nsamp,"simulated parameter vectors"),x="Parameter value",y="Density") +
+  theme(axis.text=element_text(size=10),axis.title=element_text(size=20),title=element_text(size=20),legend.text=element_text(size=20),strip.text=element_text(size=17))
+p1
+#
+```
+
+### Output file to rerun the model files in NONMEM with the parameter vectors
+
+```{r output_sse}
+sim_parf_out     <- sim_parf %>% mutate(SIGMA=1,model=seq(1,nrow(.))) %>% # add sigma vector/sample number
+  select(model,CL:SIGMA) # reorder to use in -rawres_input of sse command in PsN
+
+#use as input for sse
+#write.csv(sim_parf_out, paste("sim_paramsR",nsamp,".csv",sep=""), row.names=FALSE)
+```
+
+###Simulate with uncertainty using parameter vector generated above
+
+Note that the SSE model file should have MAXEVAL=0, this will allow skipping estimation and just evaluating at the final model parameter estimates from the file generated above.
+```{r sse_model_file,echo=FALSE}
+run1sse <- "
+$PROBLEM    PHENOBARB additive model
+
+$INPUT      ID TIME AMT WT APGR DV
+$DATA       PHENO.dta IGNORE=@
+
+$SUBROUTINE ADVAN1 TRANS2
+
+$PK
+
+  TVCL = THETA(1)*(WT/3)**THETA(4) ; typical value of CL
+  TVV  = THETA(2)*(WT/3)**THETA(5) ; typical value of V
+  
+  CL   = TVCL*EXP(ETA(1))          ; individual value of CL
+  V    = TVV*EXP(ETA(2))           ; individual value of V
+  S1   = V
+
+$ERROR
+
+  IPRED  = F              ; individual prediction
+  IRES   = DV - F         ; individual residual
+  W      = THETA(3)       ; additive residual error
+  IF(W.EQ.0) W = 1
+  IWRES  = IRES/W         ; individual weighed residual
+
+IF(ICALL.EQ.4) THEN
+     Y=DV
+ELSE
+     Y=IPRED+ERR(1)*W
+ENDIF
+
+$THETA (0,.005) ; CL
+$THETA (0,1.45) ; V
+$THETA (0, 5)   ; RUV
+$THETA (0, .75) ; WTCL
+$THETA (0, 1)   ; WTV
+
+$OMEGA  0.228   ; VARCL
+$OMEGA  0.146   ; VARV
+
+$SIGMA  1 FIX   ; SIGMA
+
+$ESTIMATION METHOD=1 MAXEVAL=0 ; FOCE calculation method
+;$COV
+
+"
+cat(run1sse,"\n")
+```
+
+Use the following code below to run the SSE in PsN.
+
+```{r psn_code,echo=FALSE}
+sse_code <- "sse run1_SSE.mod -samples=5000 -seed=123 -rawres_input=sim_paramsR5000.csv - offset_rawres=0"
+
+cat(sse_code,"\n")
+```
+
+### Using mrgsolve to do the simulation
+
+```{r ev_data_set}
+# lets assume ld=10mg/kg and md=2.5mg/kg given bid every 12hours
+ld <- ev(ID=1:100,dose=10,time=0)
+md <- ev(ID=1:100,dose=2.5,time=12, ii=12,addl=6)
+dose_df <- ld+md 
+wt <- data_frame(ID=1:100,wt=rnorm(100,3,1))
+dose_df <- dose_df@data %>% as_data_frame %>% left_join(wt) %>% mutate(amt=round(dose*wt,2))
+
+```
+
+Next steps:
+1. dose_df is dataset that will provide 100 subjects with dosing. 
+2. "sim_parf_out" is the dataset that will give you the parameter vector
+3. MEREGE dose-df with parameter vector dataset such that you will have 100 subjects/parameter vector
+4. For each simulation in mrgsim, you need to use the "dosedf" dataset and do a "by_row" such that each vector of parameters are used on the dataset (use the model column in the parameter dataset), thus giving you 5000 trials with different parameter vectors to simulate from.
+
+
+
+
+```{r}
+devtools::session_info()
+```

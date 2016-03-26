@@ -1,0 +1,20 @@
+bookdown::gitbook:
+  css: style.css
+  config:
+    toc:
+      before: |
+        <li><a href="./"> Bookdown Boilerplate </a></li>
+      after: |
+        <li><a href="https://www.github.com/dpastoor/bookdown-boilerplate" target="blank"> bookdown boilerplate </a></li>
+    edit:
+      link: https://github.com/dpastoor/bookdown-boilerplate/edit/master/%s
+      text: "Edit"
+bookdown::tufte_html_book:
+  css: [style.css, toc.css]
+bookdown::pdf_book:
+  includes:
+    in_header: preamble.tex
+  latex_engine: xelatex
+  citation_package: natbib
+bookdown::html_book:
+  css: [style.css, toc.css]

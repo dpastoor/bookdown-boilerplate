@@ -1,0 +1,12 @@
+--- 
+title: "mrgsolve examples"
+author: "Devin Pastoor"
+date: "`r Sys.Date()`"
+knit: "bookdown::render_book"
+documentclass: book
+bibliography: [book.bib, packages.bib]
+biblio-style: apalike
+link-citations: yes
+---
+
+Starting index
